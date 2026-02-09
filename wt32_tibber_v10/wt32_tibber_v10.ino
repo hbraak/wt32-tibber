@@ -14,6 +14,7 @@
 #include "modbus_helpers.h"
 #include "tibber.h"
 #include "boiler.h"
+#include "vrm.h"
 
 // Dark Theme Colors (RGB565)
 #define BG_DARK    0x18E3   // rgb(25,25,30)
@@ -185,6 +186,11 @@ const int SPACE = 5;
 #define TAB3_BUTTON_W 40
 #define TAB3_BUTTON_H 40
 
+#define TAB4_BUTTON_X 439
+#define TAB4_BUTTON_Y 241
+#define TAB4_BUTTON_W 40
+#define TAB4_BUTTON_H 40
+
 #define SUN_ICON_X BORDER
 #define SUN_ICON_Y (CAR_ICON_Y + SPACE + 2*ICON_HEIGHT + SPACE)
 #define SUN_ICON_WIDTH 40
@@ -194,6 +200,12 @@ const int SPACE = 5;
 #define GRID_ICON_Y (CAR_ICON_Y + 3*SPACE + 3*ICON_HEIGHT)
 #define GRID_ICON_WIDTH ICON_WIDTH1
 #define GRID_ICON_HEIGHT ICON_HEIGHT
+
+// VRM daily stats card (row 4, right of grid — aligned with row above)
+#define VRM_CARD_X (GRID_ICON_X + GRID_ICON_WIDTH + SPACE)
+#define VRM_CARD_Y GRID_ICON_Y
+#define VRM_CARD_W (H2O_RECT_X + H2O_RECT_SIZE - VRM_CARD_X)
+#define VRM_CARD_H GRID_ICON_HEIGHT
 
 #define WIFI_ICON_X 439
 #define WIFI_ICON_Y 280
@@ -255,6 +267,16 @@ int weatherHumidity = 0;
 bool weatherLoaded = false;
 unsigned long lastWeatherFetch = 0;
 
+// Forecast data (5-day / 3h = 40 data points)
+#define FORECAST_MAX 40
+float forecastTemp[FORECAST_MAX] = {0};
+int   forecastId[FORECAST_MAX] = {0};    // weather condition code
+float forecastRain[FORECAST_MAX] = {0};  // mm/3h
+int   forecastHour[FORECAST_MAX] = {0};  // hour of day
+int   forecastDay[FORECAST_MAX] = {0};   // day of month
+int   forecastCount = 0;
+bool  forecastLoaded = false;
+
 void fetchWeather() {
     if (WiFi.status() != WL_CONNECTED) return;
 
@@ -286,6 +308,50 @@ void fetchWeather() {
     lastWeatherFetch = millis();
 }
 
+void fetchForecast() {
+    if (WiFi.status() != WL_CONNECTED) return;
+
+    HTTPClient http;
+    String url = String("http://api.openweathermap.org/data/2.5/forecast?id=")
+                 + WEATHER_CITY_ID + "&appid=" + WEATHER_API_KEY
+                 + "&units=metric&lang=de&cnt=40";
+    http.begin(url);
+    http.setTimeout(10000);
+
+    int httpCode = http.GET();
+    if (httpCode == 200) {
+        String response = http.getString();
+        DynamicJsonDocument* doc = new DynamicJsonDocument(16384);
+        if (doc) {
+            if (!deserializeJson(*doc, response)) {
+                JsonArray list = (*doc)["list"];
+                forecastCount = 0;
+                for (JsonObject entry : list) {
+                    if (forecastCount >= FORECAST_MAX) break;
+                    forecastTemp[forecastCount] = entry["main"]["temp"];
+                    forecastId[forecastCount] = entry["weather"][0]["id"];
+                    // Rain: "rain"."3h" or 0
+                    forecastRain[forecastCount] = entry["rain"]["3h"] | 0.0f;
+                    // Parse timestamp for hour/day
+                    time_t dt = (time_t)entry["dt"].as<long>();
+                    struct tm* ti = localtime(&dt);
+                    if (ti) {
+                        forecastHour[forecastCount] = ti->tm_hour;
+                        forecastDay[forecastCount] = ti->tm_mday;
+                    }
+                    forecastCount++;
+                }
+                forecastLoaded = true;
+                Serial.printf("Forecast: %d entries loaded\n", forecastCount);
+            }
+            delete doc;
+        }
+    } else {
+        Serial.printf("Forecast API error: HTTP %d\n", httpCode);
+    }
+    http.end();
+}
+
 // Draw weather icon based on OWM condition code
 void drawWeatherSymbol(int x, int y, int id) {
     int cx = x + 25, cy = y + 22;
@@ -302,16 +368,16 @@ void drawWeatherSymbol(int x, int y, int id) {
         lcd.fillCircle(cx - 4, cy, 10, TEXT_DIM);
         lcd.fillCircle(cx + 8, cy - 2, 12, TEXT_DIM);
         lcd.fillRect(cx - 10, cy, 26, 8, TEXT_DIM);
-        lcd.fillCircle(cx - 4, cy + 16, 2, COL_OCEAN);
-        lcd.fillCircle(cx + 6, cy + 18, 2, COL_OCEAN);
+        lcd.fillCircle(cx - 4, cy + 16, 2, 0x5DDF);
+        lcd.fillCircle(cx + 6, cy + 18, 2, 0x5DDF);
     } else if (id >= 500 && id < 600) {
         // Rain: cloud + lines
         lcd.fillCircle(cx - 4, cy, 10, TEXT_DIM);
         lcd.fillCircle(cx + 8, cy - 2, 12, TEXT_DIM);
         lcd.fillRect(cx - 10, cy, 26, 8, TEXT_DIM);
-        lcd.drawLine(cx - 6, cy + 14, cx - 8, cy + 22, COL_OCEAN);
-        lcd.drawLine(cx + 2, cy + 14, cx, cy + 22, COL_OCEAN);
-        lcd.drawLine(cx + 10, cy + 14, cx + 8, cy + 22, COL_OCEAN);
+        lcd.drawLine(cx - 6, cy + 14, cx - 8, cy + 22, 0x5DDF);
+        lcd.drawLine(cx + 2, cy + 14, cx, cy + 22, 0x5DDF);
+        lcd.drawLine(cx + 10, cy + 14, cx + 8, cy + 22, 0x5DDF);
     } else if (id >= 600 && id < 700) {
         // Snow: cloud + dots
         lcd.fillCircle(cx - 4, cy, 10, TEXT_DIM);
@@ -544,6 +610,7 @@ void drawTabButtons() {
         {TAB1_BUTTON_X, TAB1_BUTTON_Y, "1"},
         {TAB2_BUTTON_X, TAB2_BUTTON_Y, "2"},
         {TAB3_BUTTON_X, TAB3_BUTTON_Y, "3"},
+        {TAB4_BUTTON_X, TAB4_BUTTON_Y, "4"},
     };
     for (auto& t : tabs) {
         lcd.fillRoundRect(t.x, t.y, TAB1_BUTTON_W, TAB1_BUTTON_H, R, CARD_DARK);
@@ -768,13 +835,28 @@ void drawWeather() {
 void drawGridPowerButton() {
     lcd.fillRoundRect(GRID_ICON_X, GRID_ICON_Y, GRID_ICON_WIDTH, GRID_ICON_HEIGHT, R, COL_NAVY);
     lcd.drawRoundRect(GRID_ICON_X, GRID_ICON_Y, GRID_ICON_WIDTH, GRID_ICON_HEIGHT, R, CARD_BORDER);
-    String text = String(totalGridPowerKW, 2) + " kW";
-    lcd.setTextColor(TFT_WHITE);
+
+    // Top: current power (large)
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.2f kW", totalGridPowerKW);
     lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
-    int tw = lcd.textWidth(text);
+    lcd.setTextColor(TFT_WHITE);
+    int tw = lcd.textWidth(buf);
     lcd.setCursor(GRID_ICON_X + (GRID_ICON_WIDTH - tw) / 2,
-                  GRID_ICON_Y + (GRID_ICON_HEIGHT - lcd.fontHeight()) / 2);
-    lcd.print(text);
+                  GRID_ICON_Y + GRID_ICON_HEIGHT / 4 - lcd.fontHeight() / 2);
+    lcd.print(buf);
+
+    // Bottom: daily grid import
+    if (vrmDataLoaded) {
+        lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
+        lcd.setTextColor(COL_WARN_YLW);
+        char imp[16];
+        snprintf(imp, sizeof(imp), "%.1f kWh", vrmGridToConsumer);
+        tw = lcd.textWidth(imp);
+        lcd.setCursor(GRID_ICON_X + (GRID_ICON_WIDTH - tw) / 2,
+                      GRID_ICON_Y + 3 * GRID_ICON_HEIGHT / 4 - lcd.fontHeight() / 2);
+        lcd.print(imp);
+    }
 }
 
 void drawPylontechSOCWithPower() {
@@ -799,6 +881,207 @@ void drawPylontechSOCWithPower() {
     int pw = lcd.textWidth(powerStr);
     lcd.setCursor(rx + (rw - pw) / 2, ry + 3 * rh / 4 - lcd.fontHeight() / 2);
     lcd.print(powerStr);
+}
+
+void drawWeatherForecast() {
+    if (!forecastLoaded || forecastCount == 0) {
+        lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
+        lcd.setTextColor(TEXT_DIM);
+        lcd.setCursor(100, 150);
+        lcd.print("Lade Vorhersage...");
+        return;
+    }
+
+    int graphX = 50, graphY = 50;
+    int graphWidth = lcd.width() - 130;
+    int graphHeight = lcd.height() * 2 / 3;
+
+    lcd.fillRoundRect(graphX, graphY, graphWidth, graphHeight, R, CARD_DARK);
+    lcd.drawRoundRect(graphX, graphY, graphWidth, graphHeight, R, CARD_BORDER);
+
+    // Title
+    lcd.setTextSize(1);
+    lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
+    lcd.setTextColor(TEXT_LIGHT);
+    lcd.setCursor(graphX, graphY - 25);
+    lcd.print("Wetter 5 Tage");
+
+    // Find temp range
+    float minT = 99, maxT = -99;
+    for (int i = 0; i < forecastCount; i++) {
+        if (forecastTemp[i] < minT) minT = forecastTemp[i];
+        if (forecastTemp[i] > maxT) maxT = forecastTemp[i];
+    }
+    minT = floor(minT) - 2;
+    maxT = ceil(maxT) + 2;
+    float tempRange = maxT - minT;
+    if (tempRange < 5) tempRange = 5;
+
+    // Y-axis temp labels
+    lcd.setFont(&lgfx::v1::fonts::FreeSans9pt7b);
+    lcd.setTextColor(TEXT_DIM);
+    for (int i = 0; i <= 4; i++) {
+        float t = minT + i * (tempRange / 4.0);
+        int y = graphY + graphHeight - (i * graphHeight / 4);
+        lcd.drawLine(graphX, y, graphX + graphWidth, y, 0x2104);
+        lcd.setCursor(graphX - 40, y - 5);
+        lcd.printf("%.0f", t);
+    }
+
+    // Bar width
+    int barW = graphWidth / forecastCount;
+    if (barW < 2) barW = 2;
+
+    // Draw rain bars (background, blue, from bottom)
+    float maxRain = 1.0;
+    for (int i = 0; i < forecastCount; i++) {
+        if (forecastRain[i] > maxRain) maxRain = forecastRain[i];
+    }
+    for (int i = 0; i < forecastCount; i++) {
+        if (forecastRain[i] > 0.01) {
+            int x = graphX + i * barW;
+            int barH = (forecastRain[i] / maxRain) * (graphHeight / 3);
+            lcd.fillRect(x, graphY + graphHeight - barH, barW - 1, barH, 0x5DDF); // bright cyan
+        }
+    }
+
+    // Draw temperature line
+    for (int i = 1; i < forecastCount; i++) {
+        int x0 = graphX + (i - 1) * barW + barW / 2;
+        int x1 = graphX + i * barW + barW / 2;
+        int y0 = graphY + graphHeight - ((forecastTemp[i-1] - minT) / tempRange) * graphHeight;
+        int y1 = graphY + graphHeight - ((forecastTemp[i] - minT) / tempRange) * graphHeight;
+        lcd.drawLine(x0, y0, x1, y1, COL_AMBER);
+        lcd.drawLine(x0, y0 + 1, x1, y1 + 1, COL_AMBER); // thicker
+    }
+
+    // Draw dots at each point
+    for (int i = 0; i < forecastCount; i++) {
+        int x = graphX + i * barW + barW / 2;
+        int y = graphY + graphHeight - ((forecastTemp[i] - minT) / tempRange) * graphHeight;
+        lcd.fillCircle(x, y, 2, TEXT_LIGHT);
+    }
+
+    // Day separators and labels at bottom
+    lcd.setFont(&lgfx::v1::fonts::FreeSans9pt7b);
+    lcd.setTextColor(TEXT_DIM);
+    const char* wdays[] = {"So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"};
+    int prevDay = -1;
+    for (int i = 0; i < forecastCount; i++) {
+        if (forecastDay[i] != prevDay) {
+            int x = graphX + i * barW;
+            if (prevDay >= 0) {
+                lcd.drawLine(x, graphY, x, graphY + graphHeight, CARD_BORDER);
+            }
+            // Find weekday for this entry
+            // We stored day of month, reconstruct weekday from forecast timestamp
+            struct tm timeinfo;
+            if (getLocalTime(&timeinfo)) {
+                // Offset from today
+                int dayDiff = forecastDay[i] - timeinfo.tm_mday;
+                if (dayDiff < 0) dayDiff += 31; // month wrap approximation
+                int wday = (timeinfo.tm_wday + dayDiff) % 7;
+                char label[12];
+                snprintf(label, sizeof(label), "%s %d.", wdays[wday], forecastDay[i]);
+                lcd.setCursor(x + 4, graphY + graphHeight + 5);
+                lcd.print(label);
+            }
+            prevDay = forecastDay[i];
+        }
+    }
+
+    // Right Y-axis: rain mm
+    lcd.setFont(&lgfx::v1::fonts::FreeSans9pt7b);
+    lcd.setTextColor(0x5DDF);  // cyan like rain bars
+    for (int i = 0; i <= 4; i++) {
+        float r = i * (maxRain / 4.0);
+        int y = graphY + graphHeight - (i * graphHeight / 4);
+        char rlbl[8];
+        snprintf(rlbl, sizeof(rlbl), "%.1f", r);
+        lcd.setCursor(graphX + graphWidth + 4, y - 5);
+        lcd.print(rlbl);
+    }
+    lcd.setCursor(graphX + graphWidth + 4, graphY - 25);
+    lcd.print("mm");
+
+    // Weather icons at top: one per day around noon
+    // If that day has rain, override icon to show rain
+    for (int i = 0; i < forecastCount; i++) {
+        if (forecastHour[i] >= 12 && forecastHour[i] <= 14) {
+            int x = graphX + i * barW + barW / 2 - 15;
+            // Check if this day has any rain
+            float dayRain = 0;
+            for (int j = 0; j < forecastCount; j++) {
+                if (forecastDay[j] == forecastDay[i]) dayRain += forecastRain[j];
+            }
+            int iconId = forecastId[i];
+            // If rain on this day but icon doesn't show rain, force rain icon
+            if (dayRain > 0.1 && (iconId < 300 || iconId >= 600) && iconId != 800) {
+                iconId = 500; // light rain icon
+            }
+            drawWeatherSymbol(x, graphY + 2, iconId);
+        }
+    }
+}
+
+void drawVrmStats() {
+    // Three sub-cells with SPACE gaps, right-aligned with row above
+    int totalGaps = 2 * SPACE;  // 2 gaps between 3 cells
+    int cw = (VRM_CARD_W - totalGaps) / 3;
+    int cellH = VRM_CARD_H;
+    // Positions: cell0, gap, cell1, gap, cell2 (cell2 stretches to right edge)
+    int cx0 = VRM_CARD_X;
+    int cx1 = cx0 + cw + SPACE;
+    int cx2 = cx1 + cw + SPACE;
+    int cw2 = VRM_CARD_X + VRM_CARD_W - cx2;  // last cell fills to right edge
+
+    int cxArr[] = {cx0, cx1, cx2};
+    int cwArr[] = {cw, cw, cw2};
+
+    for (int i = 0; i < 3; i++) {
+        lcd.fillRoundRect(cxArr[i], VRM_CARD_Y, cwArr[i], cellH, R, CARD_DARK);
+        lcd.drawRoundRect(cxArr[i], VRM_CARD_Y, cwArr[i], cellH, R, CARD_BORDER);
+    }
+
+    if (!vrmDataLoaded) {
+        lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
+        lcd.setTextColor(TEXT_DIM);
+        int tw = lcd.textWidth("VRM...");
+        lcd.setCursor(VRM_CARD_X + (VRM_CARD_W - tw) / 2, VRM_CARD_Y + cellH / 2 - lcd.fontHeight() / 2);
+        lcd.print("VRM...");
+        return;
+    }
+
+    char buf[24];
+    int fh, tw;
+    const char* labels[] = {"Ertrag", "Eigen", NULL};
+    uint16_t valColors[] = {COL_AMBER, COL_SOFT_GRN, 0};
+    labels[2] = "Einsp.";
+    valColors[2] = COL_SOFT_GRN;
+
+    // Prepare value strings
+    char vals[3][16];
+    snprintf(vals[0], sizeof(vals[0]), "%.1f", vrmSolarYield);
+    snprintf(vals[1], sizeof(vals[1]), "%.0f%%", vrmSelfConsumption);
+    snprintf(vals[2], sizeof(vals[2]), "%.1f", vrmGridToGrid);
+
+    for (int i = 0; i < 3; i++) {
+        // Label (top half)
+        lcd.setFont(&lgfx::v1::fonts::FreeSans9pt7b);
+        lcd.setTextColor(TEXT_DIM);
+        fh = lcd.fontHeight();
+        tw = lcd.textWidth(labels[i]);
+        lcd.setCursor(cxArr[i] + (cwArr[i] - tw) / 2, VRM_CARD_Y + cellH / 4 - fh / 2);
+        lcd.print(labels[i]);
+
+        // Value (bottom half)
+        lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
+        lcd.setTextColor(valColors[i]);
+        fh = lcd.fontHeight();
+        tw = lcd.textWidth(vals[i]);
+        lcd.setCursor(cxArr[i] + (cwArr[i] - tw) / 2, VRM_CARD_Y + 3 * cellH / 4 - fh / 2);
+        lcd.print(vals[i]);
+    }
 }
 
 void drawClockTab() {
@@ -832,12 +1115,16 @@ void displayData() {
         drawHouseIcon();
         drawPylontechSOCWithPower();
         drawGridPowerButton();
+        drawVrmStats();
         drawWeather();
     } else if (currentTab == 2) {
         lcd.fillRect(0, 0, TAB1_BUTTON_X - 1, TFT_HEIGHT, BG_DARK);
     } else if (currentTab == 3) {
         lcd.fillRect(0, 0, TAB1_BUTTON_X - 1, TFT_HEIGHT, BG_DARK);
         drawTibberPriceGraph(tibberPrices, 48);
+    } else if (currentTab == 4) {
+        lcd.fillRect(0, 0, TAB1_BUTTON_X - 1, TFT_HEIGHT, BG_DARK);
+        drawWeatherForecast();
     }
 }
 
@@ -856,6 +1143,8 @@ void switchTab(int tab) {
         drawClockTab();
         drawBoilerSwitch();
     } else if (currentTab == 3) {
+        displayData();
+    } else if (currentTab == 4) {
         displayData();
     }
 }
@@ -1100,6 +1389,9 @@ void touchTask(void *parameter) {
                             else if (isWithinButton(x, y, TIBBER_RECT_X, TIBBER_RECT_Y, TIBBER_RECT_SIZE, TIBBER_RECT_SIZE)) {
                                 switchTab(3);
                             }
+                            else if (isWithinButton(x, y, WEATHER_X, WEATHER_Y, WEATHER_W, WEATHER_H)) {
+                                switchTab(4);
+                            }
                         }
 
                         if (currentTab == 2) {
@@ -1127,6 +1419,9 @@ void touchTask(void *parameter) {
                         }
                         else if (isWithinButton(x, y, TAB3_BUTTON_X, TAB3_BUTTON_Y, TAB3_BUTTON_W, TAB3_BUTTON_H)) {
                             switchTab(3);
+                        }
+                        else if (isWithinButton(x, y, TAB4_BUTTON_X, TAB4_BUTTON_Y, TAB4_BUTTON_W, TAB4_BUTTON_H)) {
+                            switchTab(4);
                         }
 
                         LCD_UNLOCK();
@@ -1200,7 +1495,11 @@ void setup() {
     // Tibber
     fetchTibberPrices();
     fetchWeather();
+    fetchForecast();
     drawTibberPrice();
+
+    // VRM daily stats
+    fetchVrmDailyStats();
 
     // Initial display
     switchTab(1);
@@ -1263,9 +1562,21 @@ void loop() {
     // Daily price fetch
     checkAndFetchTibberPrices();
 
+    // VRM update every 5 minutes
+    static unsigned long lastVrmFetch = 0;
+    if (millis() - lastVrmFetch > VRM_UPDATE_MS) {
+        lastVrmFetch = millis();
+        fetchVrmDailyStats();
+        if (displayOn && LCD_LOCK()) {
+            drawVrmStats();
+            LCD_UNLOCK();
+        }
+    }
+
     // Weather update every 30 minutes
     if (millis() - lastWeatherFetch > WEATHER_UPDATE_MS) {
         fetchWeather();
+        fetchForecast();
         if (displayOn && LCD_LOCK()) {
             drawWeather();
             LCD_UNLOCK();
