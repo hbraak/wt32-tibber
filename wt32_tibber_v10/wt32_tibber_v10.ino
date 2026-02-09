@@ -251,6 +251,7 @@ void adjustBrightness(int level);
 float weatherTemp = -999;
 int weatherId = 0;        // OWM condition code
 String weatherDesc = "";
+int weatherHumidity = 0;
 bool weatherLoaded = false;
 unsigned long lastWeatherFetch = 0;
 
@@ -274,6 +275,7 @@ void fetchWeather() {
             weatherId = doc["weather"][0]["id"];
             const char* desc = doc["weather"][0]["description"];
             weatherDesc = desc ? String(desc) : "";
+            weatherHumidity = doc["main"]["humidity"];
             weatherLoaded = true;
             Serial.printf("Weather: %.1f°C, %s (id=%d)\n", weatherTemp, weatherDesc.c_str(), weatherId);
         }
@@ -751,12 +753,14 @@ void drawWeather() {
     lcd.setCursor(tx + tw + 9, ty);
     lcd.print("C");
 
+    // Separator + Humidity (same font)
+    lcd.print(" / ");
+    lcd.print(String(weatherHumidity) + "%");
+
     // Description (smaller, below temp)
     lcd.setFont(&lgfx::v1::fonts::FreeSans9pt7b);
     lcd.setTextColor(TEXT_DIM);
-    // Truncate if too long
     String desc = weatherDesc;
-    if (desc.length() > 12) desc = desc.substring(0, 11) + ".";
     lcd.setCursor(tx, ty + 30);
     lcd.print(desc);
 }
