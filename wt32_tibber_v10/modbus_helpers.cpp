@@ -1,17 +1,19 @@
 #include "modbus_helpers.h"
 #include "globals.h"
+#include <esp_task_wdt.h>
 
 ModbusTCP mb;
 
 bool connectModbusServer(IPAddress server, int maxRetries) {
     for (int i = 0; i < maxRetries; i++) {
+        esp_task_wdt_reset();  // Reset WDT during retries
         Serial.printf("Connecting to Modbus %s (attempt %d/%d)\n", 
                        server.toString().c_str(), i + 1, maxRetries);
         if (mb.connect(server)) {
             Serial.println("Connected.");
             return true;
         }
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        vTaskDelay(pdMS_TO_TICKS(1000));  // Reduced from 2000ms
     }
     Serial.printf("Failed to connect to %s after %d attempts\n", 
                    server.toString().c_str(), maxRetries);

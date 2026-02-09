@@ -309,7 +309,7 @@ void drawTibberPriceGraph(float tibberPrices[], int size) {
     const char* germanWeekdays[] = {"So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"};
     struct tm timeinfo;
     if (getLocalTime(&timeinfo)) {
-        char todayLabel[16], tomorrowLabel[16];
+        char todayLabel[24], tomorrowLabel[24];
         snprintf(todayLabel, sizeof(todayLabel), "%s, %02d.%02d",
                  germanWeekdays[timeinfo.tm_wday], timeinfo.tm_mday, timeinfo.tm_mon + 1);
         timeinfo.tm_mday += 1;
@@ -578,7 +578,7 @@ void drawPylontechSOCWithPower() {
 void drawClockTab() {
     struct tm timeinfo;
     if (getLocalTime(&timeinfo)) {
-        char timeStr[10];
+        char timeStr[16];
         strftime(timeStr, sizeof(timeStr), "%H:%M Uhr", &timeinfo);
         lcd.setTextColor(TFT_BLACK);
         lcd.setTextSize(2);
@@ -741,7 +741,7 @@ void modbusTask(void *parameter) {
         // --- EVCS ---
         if (!evcsConnected) {
             xSemaphoreTake(modbusMutex, portMAX_DELAY);
-            evcsConnected = connectModbusServer(remoteEVCS, 3);
+            evcsConnected = connectModbusServer(remoteEVCS, 2);
             xSemaphoreGive(modbusMutex);
         }
         if (evcsConnected) {
@@ -759,7 +759,7 @@ void modbusTask(void *parameter) {
         // --- SOC ---
         if (!socConnected) {
             xSemaphoreTake(modbusMutex, portMAX_DELAY);
-            socConnected = connectModbusServer(remoteSOC, 3);
+            socConnected = connectModbusServer(remoteSOC, 2);
             xSemaphoreGive(modbusMutex);
         }
         if (socConnected) {
@@ -782,7 +782,7 @@ void modbusTask(void *parameter) {
         // --- CERBO GX ---
         if (!cerboConnected) {
             xSemaphoreTake(modbusMutex, portMAX_DELAY);
-            cerboConnected = connectModbusServer(remoteCERBO, 3);
+            cerboConnected = connectModbusServer(remoteCERBO, 2);
             xSemaphoreGive(modbusMutex);
         }
         if (cerboConnected) {
@@ -822,7 +822,8 @@ void modbusWriteTask(void *parameter) {
 
     while (true) {
         esp_task_wdt_reset();
-        if (xQueueReceive(modbusWriteQueue, &request, pdMS_TO_TICKS(5000))) {
+        // Use shorter timeout so WDT gets reset more often
+        if (xQueueReceive(modbusWriteQueue, &request, pdMS_TO_TICKS(2000))) {
             xSemaphoreTake(modbusMutex, portMAX_DELAY);
             bool ok = writeModbusData(request.server, request.reg, request.value, request.unitID);
             xSemaphoreGive(modbusMutex);
@@ -919,8 +920,17 @@ void setup() {
     Serial.begin(115200);
     Serial.println("WT32 Tibber Display v10 (stable)");
 
-    // Initialize watchdog (60s timeout)
-    esp_task_wdt_init(WDT_TIMEOUT_SEC, true);
+    // Initialize watchdog (60s timeout) - may already be initialized by bootloader
+    esp_task_wdt_config_t wdt_config = {
+        .timeout_ms = WDT_TIMEOUT_SEC * 1000,
+        .idle_core_mask = 0,
+        .trigger_panic = true
+    };
+    esp_err_t wdt_err = esp_task_wdt_init(&wdt_config);
+    if (wdt_err == ESP_ERR_INVALID_STATE) {
+        // Already initialized, reconfigure
+        esp_task_wdt_reconfigure(&wdt_config);
+    }
     esp_task_wdt_add(NULL);  // Add loop() task
 
     // Create mutexes

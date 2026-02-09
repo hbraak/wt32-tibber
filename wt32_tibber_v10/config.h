@@ -48,7 +48,7 @@
 // ============================================================
 #define MODBUS_TASK_STACK    16384  // Increased from 8192
 #define MODBUS_WRITE_STACK   8192
-#define TOUCH_TASK_STACK     8192
+#define TOUCH_TASK_STACK     12288  // Increased from 8192 per review
 #define MODBUS_LONG_INTERVAL  20000
 #define MODBUS_SHORT_INTERVAL 2000
 
