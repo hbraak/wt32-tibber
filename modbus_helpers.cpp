@@ -1,92 +1,64 @@
 #include "modbus_helpers.h"
-#include "ModbusTCP.h"  // Modbus Library
+#include "globals.h"
 
-extern ModbusTCP mb;  // Globale Deklaration des Modbus-Objekts
+ModbusTCP mb;
 
-// Liest Modbus-Daten sequentiell von jedem Server
-void readModbusData(IPAddress server, int reg, uint16_t &value, uint8_t unitID) {
-  Serial.printf("Reading Modbus data from %s, Register: %d, Unit ID: %d\n", server.toString().c_str(), reg, unitID);
-
-  // Verbindung herstellen
-  if (!mb.connect(server)) {
-    Serial.printf("Failed to connect to Modbus server: %s\n", server.toString().c_str());
-    return;
-  }
-  
-  uint16_t trans = mb.readHreg(server, reg, &value, 1, NULL, unitID);
-  uint32_t startMillis = millis();
-  while (mb.isTransaction(trans)) {
-    mb.task();
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-    
-    if (millis() - startMillis > 4000) { 
-      Serial.println("Modbus transaction timeout.");
-      break;
+bool connectModbusServer(IPAddress server, int maxRetries) {
+    for (int i = 0; i < maxRetries; i++) {
+        Serial.printf("Connecting to Modbus %s (attempt %d/%d)\n", 
+                       server.toString().c_str(), i + 1, maxRetries);
+        if (mb.connect(server)) {
+            Serial.println("Connected.");
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
-  }
+    Serial.printf("Failed to connect to %s after %d attempts\n", 
+                   server.toString().c_str(), maxRetries);
+    return false;
+}
 
-  // Überprüfung, ob die Transaktion erfolgreich war
-  if (!mb.isTransaction(trans)) {
-    Serial.printf("Read success: Register %d = %d\n", reg, value);
-  } else {
-    Serial.println("Read failed or timed out.");
-  }
+void readModbusData(IPAddress server, int reg, uint16_t &value, uint8_t unitID) {
+    if (!mb.isConnected(server)) {
+        if (!mb.connect(server)) {
+            Serial.printf("Read: Cannot connect to %s\n", server.toString().c_str());
+            return;
+        }
+    }
 
-  // Verbindung trennen
-  mb.disconnect(server);
-  Serial.printf("Disconnected from Modbus server: %s\n", server.toString().c_str());
+    uint16_t trans = mb.readHreg(server, reg, &value, 1, NULL, unitID);
+    uint32_t startMillis = millis();
+    
+    while (mb.isTransaction(trans)) {
+        mb.task();
+        vTaskDelay(pdMS_TO_TICKS(10));
+        if (millis() - startMillis > 4000) {
+            Serial.printf("Read timeout: reg %d on %s\n", reg, server.toString().c_str());
+            break;
+        }
+    }
 }
 
 bool writeModbusData(IPAddress server, int reg, uint16_t value, uint8_t unitID) {
-  Serial.printf("Writing Modbus data to %s, Register: %d, Value: %d, Unit ID: %d\n", server.toString().c_str(), reg, value, unitID);
-
-  // Verbindung herstellen
-  if (!mb.connect(server)) {
-    Serial.printf("Failed to connect to Modbus server: %s\n", server.toString().c_str());
-    return false;
-  }
-  
-  uint16_t trans = mb.writeHreg(server, reg, value, NULL, unitID);
-  uint32_t startMillis = millis();
-  
-  while (mb.isTransaction(trans)) {
-    mb.task();
-    vTaskDelay(10 / portTICK_PERIOD_MS);
-    
-    if (millis() - startMillis > 4000) {
-      Serial.println("Modbus transaction timeout. Attempting to reconnect...");
-
-      mb.disconnect(server);
-      delay(1000);  // Eine Sekunde warten, bevor neu verbunden wird
-      if (mb.connect(server)) {
-        Serial.println("Reconnected to Modbus server successfully.");
-
-        // Erneuter Schreibversuch
-        trans = mb.writeHreg(server, reg, value, NULL, unitID);
-        startMillis = millis();
-        
-        while (mb.isTransaction(trans)) {
-          mb.task();
-          vTaskDelay(10 / portTICK_PERIOD_MS);
-          
-          if (millis() - startMillis > 5000) {
-            Serial.println("Modbus transaction failed after reconnect.");
-            mb.disconnect(server);
-            return false;  // Fehlgeschlagene Transaktion
-          }
+    if (!mb.isConnected(server)) {
+        if (!mb.connect(server)) {
+            Serial.printf("Write: Cannot connect to %s\n", server.toString().c_str());
+            return false;
         }
-
-        Serial.println("Modbus transaction successful after reconnect.");
-        mb.disconnect(server);
-        return true;
-      } else {
-        Serial.println("Modbus reconnection failed.");
-        return false;
-      }
     }
-  }
 
-  Serial.println("Modbus transaction successful.");
-  mb.disconnect(server);
-  return true;
+    uint16_t trans = mb.writeHreg(server, reg, value, NULL, unitID);
+    uint32_t startMillis = millis();
+
+    while (mb.isTransaction(trans)) {
+        mb.task();
+        vTaskDelay(pdMS_TO_TICKS(10));
+        if (millis() - startMillis > 5000) {
+            Serial.printf("Write timeout: reg %d on %s\n", reg, server.toString().c_str());
+            return false;
+        }
+    }
+
+    Serial.printf("Write OK: reg %d = %d on %s\n", reg, value, server.toString().c_str());
+    return true;
 }
