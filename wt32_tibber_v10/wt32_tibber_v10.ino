@@ -7,12 +7,32 @@
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <esp_task_wdt.h>
+#include <ArduinoJson.h>
 
 #include "config.h"
 #include "globals.h"
 #include "modbus_helpers.h"
 #include "tibber.h"
 #include "boiler.h"
+
+// Dark Theme Colors (RGB565)
+#define BG_DARK    0x18E3   // rgb(25,25,30)
+#define CARD_DARK  0x2A4B   // rgb(45,48,55)
+#define CARD_BORDER 0x4228  // rgb(65,68,75)
+#define TEXT_LIGHT 0xFFFF   // white
+#define TEXT_DIM   0xA534   // rgb(160,165,175)
+#define R 6                 // corner radius
+// Muted functional colors
+#define COL_TEAL     0x2289  // rgb(40,80,100) - charge mode
+#define COL_EMERALD  0x0B26  // rgb(15,100,60) - tibber
+#define COL_OCEAN    0x1B15  // rgb(25,100,170) - water
+#define COL_NAVY     0x1B0F  // rgb(30,60,120) - grid
+#define COL_AMBER    0xF5A6  // rgb(245,180,50) - PV/sun
+#define COL_SOFT_GRN 0x2509  // rgb(40,180,80) - positive
+#define COL_SOFT_RED 0xC8A8  // rgb(200,50,50) - negative
+#define COL_WARN_YLW 0xEB86  // rgb(230,180,30) - warning
+#define COL_HOUSE_GRN 0x2509 // same as soft green
+
 
 // ============================================================
 // Display Driver
@@ -92,6 +112,12 @@ const int ICON_WIDTH0 = 70;
 const int ICON_WIDTH1 = 102;
 const int ICON_WIDTH2 = 150;
 const int SPACE = 5;
+
+// Weather display in row 2 (free space)
+#define WEATHER_X (BORDER + SPACE + ICON_WIDTH1 + ICON_HEIGHT + SPACE)
+#define WEATHER_Y (BORDER + ICON_HEIGHT + SPACE)
+#define WEATHER_W (H2O_RECT_X + H2O_RECT_SIZE - WEATHER_X)
+#define WEATHER_H ICON_HEIGHT
 
 #define BOILER_SWITCH_X BORDER
 #define BOILER_SWITCH_Y BORDER
@@ -220,23 +246,141 @@ void drawTibberPriceGraph(float prices[], int size);
 void adjustBrightness(int level);
 
 // ============================================================
+// Weather Data
+// ============================================================
+float weatherTemp = -999;
+int weatherId = 0;        // OWM condition code
+String weatherDesc = "";
+bool weatherLoaded = false;
+unsigned long lastWeatherFetch = 0;
+
+void fetchWeather() {
+    if (WiFi.status() != WL_CONNECTED) return;
+
+    HTTPClient http;
+    String url = String("http://api.openweathermap.org/data/2.5/weather?id=")
+                 + WEATHER_CITY_ID + "&appid=" + WEATHER_API_KEY
+                 + "&units=metric&lang=de";
+    http.begin(url);
+    http.setTimeout(8000);
+
+    int httpCode = http.GET();
+    if (httpCode == 200) {
+        String response = http.getString();
+        JsonDocument doc;
+        auto error = deserializeJson(doc, response);
+        if (!error) {
+            weatherTemp = doc["main"]["temp"];
+            weatherId = doc["weather"][0]["id"];
+            const char* desc = doc["weather"][0]["description"];
+            weatherDesc = desc ? String(desc) : "";
+            weatherLoaded = true;
+            Serial.printf("Weather: %.1f°C, %s (id=%d)\n", weatherTemp, weatherDesc.c_str(), weatherId);
+        }
+    } else {
+        Serial.printf("Weather API error: HTTP %d\n", httpCode);
+    }
+    http.end();
+    lastWeatherFetch = millis();
+}
+
+// Draw weather icon based on OWM condition code
+void drawWeatherSymbol(int x, int y, int id) {
+    int cx = x + 25, cy = y + 22;
+
+    if (id >= 200 && id < 300) {
+        // Thunderstorm: cloud + lightning
+        lcd.fillCircle(cx - 6, cy, 10, TEXT_DIM);
+        lcd.fillCircle(cx + 8, cy - 2, 12, TEXT_DIM);
+        lcd.fillRect(cx - 12, cy, 30, 10, TEXT_DIM);
+        lcd.fillTriangle(cx, cy + 12, cx - 4, cy + 12, cx + 2, cy + 24, COL_AMBER);
+        lcd.fillTriangle(cx + 2, cy + 18, cx - 2, cy + 18, cx + 4, cy + 28, COL_AMBER);
+    } else if (id >= 300 && id < 400) {
+        // Drizzle: cloud + dots
+        lcd.fillCircle(cx - 4, cy, 10, TEXT_DIM);
+        lcd.fillCircle(cx + 8, cy - 2, 12, TEXT_DIM);
+        lcd.fillRect(cx - 10, cy, 26, 8, TEXT_DIM);
+        lcd.fillCircle(cx - 4, cy + 16, 2, COL_OCEAN);
+        lcd.fillCircle(cx + 6, cy + 18, 2, COL_OCEAN);
+    } else if (id >= 500 && id < 600) {
+        // Rain: cloud + lines
+        lcd.fillCircle(cx - 4, cy, 10, TEXT_DIM);
+        lcd.fillCircle(cx + 8, cy - 2, 12, TEXT_DIM);
+        lcd.fillRect(cx - 10, cy, 26, 8, TEXT_DIM);
+        lcd.drawLine(cx - 6, cy + 14, cx - 8, cy + 22, COL_OCEAN);
+        lcd.drawLine(cx + 2, cy + 14, cx, cy + 22, COL_OCEAN);
+        lcd.drawLine(cx + 10, cy + 14, cx + 8, cy + 22, COL_OCEAN);
+    } else if (id >= 600 && id < 700) {
+        // Snow: cloud + dots
+        lcd.fillCircle(cx - 4, cy, 10, TEXT_DIM);
+        lcd.fillCircle(cx + 8, cy - 2, 12, TEXT_DIM);
+        lcd.fillRect(cx - 10, cy, 26, 8, TEXT_DIM);
+        lcd.fillCircle(cx - 5, cy + 15, 2, TEXT_LIGHT);
+        lcd.fillCircle(cx + 3, cy + 18, 2, TEXT_LIGHT);
+        lcd.fillCircle(cx + 10, cy + 14, 2, TEXT_LIGHT);
+    } else if (id >= 700 && id < 800) {
+        // Fog/mist: horizontal lines
+        for (int i = 0; i < 4; i++) {
+            lcd.drawLine(cx - 14, cy + i * 7, cx + 14, cy + i * 7, TEXT_DIM);
+        }
+    } else if (id == 800) {
+        // Clear sky: sun by day, moon by night
+        struct tm ti;
+        bool isNight = false;
+        if (getLocalTime(&ti)) isNight = (ti.tm_hour >= 19 || ti.tm_hour < 7);
+        if (isNight) {
+            // Crescent moon
+            lcd.fillCircle(cx, cy + 4, 13, 0xFFF0);  // pale yellow
+            lcd.fillCircle(cx + 7, cy + 1, 11, BG_DARK);  // cut out crescent
+        } else {
+            lcd.fillCircle(cx, cy + 4, 12, COL_AMBER);
+            for (int a = 0; a < 360; a += 45) {
+                float rad = a * PI / 180.0;
+                lcd.drawLine(cx + cos(rad) * 15, cy + 4 + sin(rad) * 15,
+                             cx + cos(rad) * 20, cy + 4 + sin(rad) * 20, COL_AMBER);
+            }
+        }
+    } else if (id == 801) {
+        // Few clouds: sun/moon + small cloud
+        struct tm ti;
+        bool isNight = false;
+        if (getLocalTime(&ti)) isNight = (ti.tm_hour >= 19 || ti.tm_hour < 7);
+        if (isNight) {
+            lcd.fillCircle(cx + 6, cy - 2, 9, 0xFFF0);
+            lcd.fillCircle(cx + 11, cy - 4, 7, BG_DARK);
+        } else {
+            lcd.fillCircle(cx + 6, cy - 2, 10, COL_AMBER);
+        }
+        lcd.fillCircle(cx - 6, cy + 6, 8, TEXT_DIM);
+        lcd.fillCircle(cx + 4, cy + 4, 10, TEXT_DIM);
+        lcd.fillRect(cx - 10, cy + 6, 20, 8, TEXT_DIM);
+    } else if (id >= 802) {
+        // Cloudy: cloud
+        lcd.fillCircle(cx - 6, cy, 10, TEXT_DIM);
+        lcd.fillCircle(cx + 8, cy - 2, 13, TEXT_DIM);
+        lcd.fillCircle(cx + 2, cy + 4, 9, TEXT_DIM);
+        lcd.fillRect(cx - 12, cy + 2, 28, 10, TEXT_DIM);
+    }
+}
+
+// ============================================================
 // Drawing Functions (all require LCD_LOCK to be held by caller)
 // ============================================================
 
 void drawWiFiIcon(bool connected) {
-    uint16_t bg = connected ? TFT_GREEN : TFT_LIGHTGREY;
-    lcd.fillRect(WIFI_ICON_X, WIFI_ICON_Y, WIFI_ICON_SIZE, WIFI_ICON_SIZE, bg);
-    lcd.drawRect(WIFI_ICON_X, WIFI_ICON_Y, WIFI_ICON_SIZE, WIFI_ICON_SIZE, TFT_BLACK);
+    uint16_t bg = connected ? TFT_GREEN : CARD_DARK;
+    lcd.fillRoundRect(WIFI_ICON_X, WIFI_ICON_Y, WIFI_ICON_SIZE, WIFI_ICON_SIZE, R, bg);
+    lcd.drawRoundRect(WIFI_ICON_X, WIFI_ICON_Y, WIFI_ICON_SIZE, WIFI_ICON_SIZE, R, CARD_BORDER);
     int cx = WIFI_ICON_X + WIFI_ICON_SIZE / 2;
     int cy = WIFI_ICON_Y + WIFI_ICON_SIZE / 2 + 10;
     lcd.drawArc(cx, cy, WIFI_ICON_SIZE / 2, WIFI_ICON_SIZE / 2, 225, 315, TFT_BLACK);
     lcd.drawArc(cx, cy, WIFI_ICON_SIZE / 3, WIFI_ICON_SIZE / 3, 225, 315, TFT_BLACK);
-    if (connected) lcd.fillCircle(cx, cy, 3, TFT_BLACK);
+    if (connected) lcd.fillCircle(cx, cy, 3, TEXT_LIGHT);
 }
 
 void drawBoilerSwitch() {
-    lcd.fillRect(BOILER_SWITCH_X, BOILER_SWITCH_Y, BOILER_SWITCH_W, BOILER_SWITCH_H, TFT_GREY);
-    lcd.drawRect(BOILER_SWITCH_X, BOILER_SWITCH_Y, BOILER_SWITCH_W, BOILER_SWITCH_H, TFT_BLACK);
+    lcd.fillRoundRect(BOILER_SWITCH_X, BOILER_SWITCH_Y, BOILER_SWITCH_W, BOILER_SWITCH_H, R, CARD_DARK);
+    lcd.drawRoundRect(BOILER_SWITCH_X, BOILER_SWITCH_Y, BOILER_SWITCH_W, BOILER_SWITCH_H, R, CARD_BORDER);
     String modeText;
     switch (boilerMode) {
         case 0: modeText = "Auto"; break;
@@ -255,8 +399,8 @@ void drawBoilerSwitch() {
 void drawTibberPrice() {
     int rx = TIBBER_RECT_X, ry = TIBBER_RECT_Y;
     int rw = ICON_WIDTH0, rh = ICON_WIDTH0;
-    lcd.fillRect(rx, ry, rw, rh, TFT_DARKGREEN);
-    lcd.drawRect(rx, ry, rw, rh, TFT_BLACK);
+    lcd.fillRoundRect(rx, ry, rw, rh, R, COL_EMERALD);
+    lcd.drawRoundRect(rx, ry, rw, rh, R, CARD_BORDER);
     lcd.setTextColor(TFT_WHITE);
     lcd.setTextSize(1);
     lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
@@ -280,10 +424,10 @@ void drawTibberPriceGraph(float tibberPrices[], int size) {
     int barWidth = (availableWidth - totalGapWidth) / size;
     int graphWidth = (barWidth * size) + totalGapWidth;
 
-    lcd.fillRect(graphX, graphY, graphWidth / 2, graphHeight, TFT_WHITE);
-    uint16_t palePink = lcd.color565(255, 228, 240);
-    lcd.fillRect(graphX + graphWidth / 2, graphY, graphWidth / 2, graphHeight, palePink);
-    lcd.drawRect(graphX, graphY, graphWidth, graphHeight, TFT_BLACK);
+    lcd.fillRect(graphX, graphY, graphWidth / 2, graphHeight, CARD_DARK);
+    uint16_t cardDark2 = 0x3A6D; // slightly lighter
+    lcd.fillRect(graphX + graphWidth / 2, graphY, graphWidth / 2, graphHeight, cardDark2);
+    lcd.drawRoundRect(graphX, graphY, graphWidth, graphHeight, R, CARD_BORDER);
 
     // Find price range (only valid prices)
     float minPrice = 999, maxPrice = -999;
@@ -302,7 +446,7 @@ void drawTibberPriceGraph(float tibberPrices[], int size) {
     if (priceRange < 1) priceRange = 1;
 
     lcd.setTextSize(1);
-    lcd.setTextColor(TFT_BLACK);
+    lcd.setTextColor(TEXT_LIGHT);
     lcd.setCursor(graphX, graphY - 25);
     lcd.print("Tibber Preis (Cent/kWh)");
 
@@ -325,14 +469,14 @@ void drawTibberPriceGraph(float tibberPrices[], int size) {
     for (int i = 0; i <= 5; i++) {
         float tickPrice = minPrice + i * (priceRange / 5.0);
         int tickY = graphY + graphHeight - (i * graphHeight / 5);
-        lcd.drawLine(graphX, tickY, graphX + graphWidth, tickY, TFT_LIGHTGREY);
+        lcd.drawLine(graphX, tickY, graphX + graphWidth, tickY, CARD_DARK);
         lcd.setCursor(graphX - 30, tickY - 5);
         lcd.printf("%.0f", tickPrice);
     }
 
     for (int i = 0; i < size; i += 6) {
         int tickX = graphX + (i * (barWidth + 1));
-        lcd.drawLine(tickX, graphY, tickX, graphY + graphHeight, TFT_LIGHTGREY);
+        lcd.drawLine(tickX, graphY, tickX, graphY + graphHeight, CARD_DARK);
     }
 
     int currentHour = getCurrentHour();
@@ -347,7 +491,7 @@ void drawTibberPriceGraph(float tibberPrices[], int size) {
 
     if (currentHour >= 0 && currentHour < size) {
         int currentX = graphX + (currentHour * (barWidth + 1));
-        lcd.setTextColor(TFT_DARKGREEN);
+        lcd.setTextColor(COL_EMERALD);
         lcd.setCursor(currentX + 5, graphY + 5);
         lcd.printf("%dh:", currentHour);
         lcd.setCursor(currentX + 55, graphY + 5);
@@ -356,9 +500,9 @@ void drawTibberPriceGraph(float tibberPrices[], int size) {
 }
 
 void drawBrightnessButton() {
-    lcd.fillRect(BRIGHTNESS_RECT_X, BRIGHTNESS_RECT_Y, BRIGHTNESS_RECT_W, BRIGHTNESS_RECT_H, TFT_GREY);
-    lcd.drawRect(BRIGHTNESS_RECT_X, BRIGHTNESS_RECT_Y, BRIGHTNESS_RECT_W, BRIGHTNESS_RECT_H, TFT_BLACK);
-    lcd.setTextSize(1); lcd.setTextColor(TFT_BLACK);
+    lcd.fillRoundRect(BRIGHTNESS_RECT_X, BRIGHTNESS_RECT_Y, BRIGHTNESS_RECT_W, BRIGHTNESS_RECT_H, R, CARD_DARK);
+    lcd.drawRoundRect(BRIGHTNESS_RECT_X, BRIGHTNESS_RECT_Y, BRIGHTNESS_RECT_W, BRIGHTNESS_RECT_H, R, CARD_BORDER);
+    lcd.setTextSize(1); lcd.setTextColor(TEXT_LIGHT);
     int tw = lcd.textWidth("B");
     lcd.setCursor(BRIGHTNESS_RECT_X + (BRIGHTNESS_RECT_W - tw) / 2,
                   BRIGHTNESS_RECT_Y + (BRIGHTNESS_RECT_H - lcd.fontHeight()) / 2);
@@ -367,14 +511,25 @@ void drawBrightnessButton() {
 
 void drawSunIcon() {
     const int containerW = 102, containerH = 70;
-    lcd.fillRect(SUN_ICON_X, SUN_ICON_Y, containerW, containerH, TFT_YELLOW);
-    lcd.drawRect(SUN_ICON_X, SUN_ICON_Y, containerW, containerH, TFT_BLACK);
-    lcd.fillRect(SUN_ICON_X + 2, SUN_ICON_Y + 2, 40, 40, TFT_BLACK);
-    lcd.drawBitmap(SUN_ICON_X + 2, SUN_ICON_Y + 2, sunIcon, 40, 40, TFT_YELLOW);
+    lcd.fillRoundRect(SUN_ICON_X, SUN_ICON_Y, containerW, containerH, R, COL_AMBER);
+    lcd.drawRoundRect(SUN_ICON_X, SUN_ICON_Y, containerW, containerH, R, CARD_BORDER);
+
+    // Draw sun symbol (circle + rays) instead of bitmap
+    int sx = SUN_ICON_X + 22, sy = SUN_ICON_Y + 20;
+    lcd.fillCircle(sx, sy, 10, TFT_BLACK);
+    lcd.fillCircle(sx, sy, 8, COL_AMBER);
+    lcd.fillCircle(sx, sy, 6, TFT_BLACK);
+    // Rays
+    for (int a = 0; a < 360; a += 45) {
+        float rad = a * PI / 180.0;
+        int x1 = sx + cos(rad) * 12, y1 = sy + sin(rad) * 12;
+        int x2 = sx + cos(rad) * 16, y2 = sy + sin(rad) * 16;
+        lcd.drawLine(x1, y1, x2, y2, TFT_BLACK);
+    }
 
     float totalPvPower = (dcPvPower + acPvPower[0] + acPvPower[1] + acPvPower[2]) / 1000.0;
     String pvText = String(totalPvPower, 1) + " kW";
-    lcd.setTextColor(TFT_BLACK);
+    lcd.setTextColor(TFT_BLACK);  // black text on amber/yellow
     lcd.setTextSize(1);
     lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
     lcd.setCursor(SUN_ICON_X + 22, SUN_ICON_Y + 3 * (containerH / 4) - (lcd.fontHeight() / 2));
@@ -382,16 +537,16 @@ void drawSunIcon() {
 }
 
 void drawTabButtons() {
-    lcd.fillRect(439, 1, TAB1_BUTTON_W, 319, TFT_WHITE);
+    lcd.fillRect(439, 1, TAB1_BUTTON_W, 319, BG_DARK);
     const struct { int x, y; const char* label; } tabs[] = {
         {TAB1_BUTTON_X, TAB1_BUTTON_Y, "1"},
         {TAB2_BUTTON_X, TAB2_BUTTON_Y, "2"},
         {TAB3_BUTTON_X, TAB3_BUTTON_Y, "3"},
     };
     for (auto& t : tabs) {
-        lcd.fillRect(t.x, t.y, TAB1_BUTTON_W, TAB1_BUTTON_H, TFT_GREY);
-        lcd.drawRect(t.x, t.y, TAB1_BUTTON_W, TAB1_BUTTON_H, TFT_BLACK);
-        lcd.setTextSize(1); lcd.setTextColor(TFT_BLACK);
+        lcd.fillRoundRect(t.x, t.y, TAB1_BUTTON_W, TAB1_BUTTON_H, R, CARD_DARK);
+        lcd.drawRoundRect(t.x, t.y, TAB1_BUTTON_W, TAB1_BUTTON_H, R, CARD_BORDER);
+        lcd.setTextSize(1); lcd.setTextColor(TEXT_LIGHT);
         int tw = lcd.textWidth(t.label);
         lcd.setCursor(t.x + (TAB1_BUTTON_W - tw) / 2, t.y + (TAB1_BUTTON_H - lcd.fontHeight()) / 2);
         lcd.print(t.label);
@@ -402,33 +557,33 @@ void drawCarConnectionButton() {
     uint16_t iconColor = (chargerStatus != 0) ? TFT_GREEN : TFT_GREY;
     lcd.fillRect(CAR_ICON_X, CAR_ICON_Y, CAR_ICON_WIDTH, CAR_ICON_HEIGHT, TFT_BLACK);
     lcd.drawBitmap(CAR_ICON_X, CAR_ICON_Y, carIcon, CAR_ICON_WIDTH, CAR_ICON_HEIGHT, iconColor);
-    lcd.drawRect(CAR_ICON_X, CAR_ICON_Y, CAR_ICON_WIDTH, CAR_ICON_HEIGHT, TFT_BLACK);
+    lcd.drawRoundRect(CAR_ICON_X, CAR_ICON_Y, CAR_ICON_WIDTH, CAR_ICON_HEIGHT, R, CARD_BORDER);
 }
 
 void drawSOCThreshold() {
     uint16_t color;
     switch (rectangleState) {
-        case GREEN:  SOC_THRESHOLD = 80;  color = TFT_GREEN; break;
-        case YELLOW: SOC_THRESHOLD = 90;  color = TFT_YELLOW; break;
-        case RED:    SOC_THRESHOLD = 100; color = TFT_RED; break;
+        case GREEN:  SOC_THRESHOLD = 80;  color = COL_SOFT_GRN; break;
+        case YELLOW: SOC_THRESHOLD = 90;  color = COL_WARN_YLW; break;
+        case RED:    SOC_THRESHOLD = 100; color = COL_SOFT_RED; break;
     }
-    lcd.fillRect(SOC_RECT_X, SOC_RECT_Y, SOC_RECT_SIZE, SOC_RECT_SIZE, color);
-    lcd.drawRect(SOC_RECT_X, SOC_RECT_Y, SOC_RECT_SIZE, SOC_RECT_SIZE, TFT_BLACK);
+    lcd.fillRoundRect(SOC_RECT_X, SOC_RECT_Y, SOC_RECT_SIZE, SOC_RECT_SIZE, R, color);
+    lcd.drawRoundRect(SOC_RECT_X, SOC_RECT_Y, SOC_RECT_SIZE, SOC_RECT_SIZE, R, CARD_BORDER);
     lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
     String text = String((int)SOC_THRESHOLD) + "%";
     int tw = lcd.textWidth(text);
     int tx = SOC_RECT_X + (SOC_RECT_SIZE - tw) / 2;
     int ty = SOC_RECT_Y + (SOC_RECT_SIZE - lcd.fontHeight()) / 2;
-    lcd.setTextColor(TFT_BLACK);
+    lcd.setTextColor((rectangleState == YELLOW) ? TFT_BLACK : TEXT_LIGHT);
     lcd.setCursor(tx, ty);
     lcd.print(text);
 }
 
 void drawChargeModeButton() {
-    uint16_t bg = lcd.color565(173, 216, 230);
-    lcd.fillRect(BUTTON_X, BUTTON_Y, BUTTON_W, BUTTON_H, bg);
-    lcd.drawRect(BUTTON_X, BUTTON_Y, BUTTON_W, BUTTON_H, TFT_BLACK);
-    lcd.setTextColor(TFT_BLACK);
+    uint16_t bg = COL_TEAL;
+    lcd.fillRoundRect(BUTTON_X, BUTTON_Y, BUTTON_W, BUTTON_H, R, bg);
+    lcd.drawRoundRect(BUTTON_X, BUTTON_Y, BUTTON_W, BUTTON_H, R, CARD_BORDER);
+    lcd.setTextColor(TEXT_LIGHT);
     lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
 
     String modeText;
@@ -451,11 +606,11 @@ void drawChargeModeButton() {
 }
 
 void drawStartStopButton() {
-    uint16_t color = (startStopCharging == 1) ? TFT_GREEN : TFT_RED;
+    uint16_t color = (startStopCharging == 1) ? COL_SOFT_GRN : COL_SOFT_RED;
     String text = (startStopCharging == 1) ? "An" : "Aus";
-    lcd.fillRect(START_STOP_RECT_X, START_STOP_RECT_Y, START_STOP_RECT_SIZE, START_STOP_RECT_SIZE, color);
-    lcd.drawRect(START_STOP_RECT_X, START_STOP_RECT_Y, START_STOP_RECT_SIZE, START_STOP_RECT_SIZE, TFT_BLACK);
-    lcd.setTextColor(TFT_BLACK);
+    lcd.fillRoundRect(START_STOP_RECT_X, START_STOP_RECT_Y, START_STOP_RECT_SIZE, START_STOP_RECT_SIZE, R, color);
+    lcd.drawRoundRect(START_STOP_RECT_X, START_STOP_RECT_Y, START_STOP_RECT_SIZE, START_STOP_RECT_SIZE, R, CARD_BORDER);
+    lcd.setTextColor(TEXT_LIGHT);
     lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
     int tw = lcd.textWidth(text);
     lcd.setCursor(START_STOP_RECT_X + (START_STOP_RECT_SIZE - tw) / 2,
@@ -468,11 +623,11 @@ void drawCarRangeButton() {
     const float consumptionPer100Km = 13.5;
     float range = (socValue / 100.0) * (maxCapacity / consumptionPer100Km);
 
-    lcd.fillRect(CAR_RANGE_X, CAR_RANGE_Y, CAR_RANGE_WIDTH, CAR_RANGE_HEIGHT, TFT_LIGHTGREY);
-    lcd.drawRect(CAR_RANGE_X, CAR_RANGE_Y, CAR_RANGE_WIDTH, CAR_RANGE_HEIGHT, TFT_BLACK);
+    lcd.fillRoundRect(CAR_RANGE_X, CAR_RANGE_Y, CAR_RANGE_WIDTH, CAR_RANGE_HEIGHT, R, CARD_DARK);
+    lcd.drawRoundRect(CAR_RANGE_X, CAR_RANGE_Y, CAR_RANGE_WIDTH, CAR_RANGE_HEIGHT, R, CARD_BORDER);
 
     String text = String(range, 0) + " km";
-    lcd.setTextColor(TFT_BLACK);
+    lcd.setTextColor(TEXT_LIGHT);
     lcd.setTextSize(1);
     lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
     int tw = lcd.textWidth(text);
@@ -482,12 +637,13 @@ void drawCarRangeButton() {
 }
 
 void drawManualModePhaseButton() {
-    uint16_t bg = (manualModePhase == 0) ? TFT_GREEN : TFT_YELLOW;
-    lcd.fillRect(MANUAL_MODE_PHASE_RECT_X, MANUAL_MODE_PHASE_RECT_Y,
-                 MANUAL_MODE_PHASE_RECT_W, MANUAL_MODE_PHASE_RECT_H, bg);
-    lcd.drawRect(MANUAL_MODE_PHASE_RECT_X, MANUAL_MODE_PHASE_RECT_Y,
-                 MANUAL_MODE_PHASE_RECT_W, MANUAL_MODE_PHASE_RECT_H, TFT_BLACK);
+    uint16_t bg = (manualModePhase == 0) ? COL_SOFT_GRN : COL_WARN_YLW;
+    lcd.fillRoundRect(MANUAL_MODE_PHASE_RECT_X, MANUAL_MODE_PHASE_RECT_Y,
+                 MANUAL_MODE_PHASE_RECT_W, MANUAL_MODE_PHASE_RECT_H, R, bg);
+    lcd.drawRoundRect(MANUAL_MODE_PHASE_RECT_X, MANUAL_MODE_PHASE_RECT_Y,
+                 MANUAL_MODE_PHASE_RECT_W, MANUAL_MODE_PHASE_RECT_H, R, CARD_BORDER);
     String text = (manualModePhase == 0) ? "2 P" : "1 P";
+    lcd.setTextColor((manualModePhase == 0) ? TEXT_LIGHT : TFT_BLACK);
     int tw = lcd.textWidth(text);
     lcd.setCursor(MANUAL_MODE_PHASE_RECT_X + (MANUAL_MODE_PHASE_RECT_W - tw) / 2,
                   MANUAL_MODE_PHASE_RECT_Y + (MANUAL_MODE_PHASE_RECT_H - lcd.fontHeight()) / 2);
@@ -495,16 +651,16 @@ void drawManualModePhaseButton() {
 }
 
 void drawCarIconWithSOC() {
-    uint16_t iconColor = (chargerStatus != 0) ? TFT_GREEN : lcd.color565(173, 216, 230);
+    uint16_t iconColor = (chargerStatus != 0) ? TFT_GREEN : COL_TEAL;
     lcd.fillRect(CAR_ICON_X, CAR_ICON_Y, CAR_ICON_WIDTH, CAR_ICON_HEIGHT, TFT_BLACK);
     lcd.drawBitmap(CAR_ICON_X, CAR_ICON_Y, carIcon, CAR_ICON_WIDTH, CAR_ICON_HEIGHT, iconColor);
-    lcd.drawRect(CAR_ICON_X, CAR_ICON_Y, CAR_ICON_WIDTH, CAR_ICON_HEIGHT, TFT_BLACK);
+    lcd.drawRoundRect(CAR_ICON_X, CAR_ICON_Y, CAR_ICON_WIDTH, CAR_ICON_HEIGHT, R, CARD_BORDER);
 
     int socPercentage = socValue / 100;
     int rectX = CAR_ICON_X + 36, rectY = CAR_ICON_Y + 22;
     int rectW = 50, rectH = 30;
     lcd.fillRect(rectX, rectY, rectW, rectH, iconColor);
-    lcd.setTextColor(TFT_BLACK);
+    lcd.setTextColor(TEXT_LIGHT);
     lcd.setTextSize(1);
     lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
     String text = String(socPercentage) + "%";
@@ -514,8 +670,8 @@ void drawCarIconWithSOC() {
 }
 
 void drawWaterTempButton() {
-    lcd.fillRect(H2O_RECT_X, H2O_RECT_Y, H2O_RECT_SIZE, H2O_RECT_SIZE, TFT_BLUE);
-    lcd.drawRect(H2O_RECT_X, H2O_RECT_Y, H2O_RECT_SIZE, H2O_RECT_SIZE, TFT_BLACK);
+    lcd.fillRoundRect(H2O_RECT_X, H2O_RECT_Y, H2O_RECT_SIZE, H2O_RECT_SIZE, R, COL_OCEAN);
+    lcd.drawRoundRect(H2O_RECT_X, H2O_RECT_Y, H2O_RECT_SIZE, H2O_RECT_SIZE, R, CARD_BORDER);
 
     float tempC = waterTemperature / 100.0;
     lcd.setTextColor(TFT_WHITE);
@@ -533,15 +689,81 @@ void drawWaterTempButton() {
 }
 
 void drawHouseIcon() {
-    lcd.fillRect(HOUSE_ICON_X, HOUSE_ICON_Y, HOUSE_ICON_WIDTH, HOUSE_ICON_HEIGHT, TFT_BLACK);
-    lcd.drawBitmap(HOUSE_ICON_X, HOUSE_ICON_Y, houseIcon, HOUSE_ICON_WIDTH, HOUSE_ICON_HEIGHT, TFT_GREEN);
-    lcd.fillRect(HOUSE_ICON_X + HOUSE_ICON_WIDTH, HOUSE_ICON_Y, 80, HOUSE_ICON_HEIGHT, TFT_GREEN);
-    lcd.drawRect(HOUSE_ICON_X, HOUSE_ICON_Y, HOUSE_ICON_WIDTH + 80, HOUSE_ICON_HEIGHT, TFT_BLACK);
+    int x = HOUSE_ICON_X, y = HOUSE_ICON_Y;
+    int w = HOUSE_ICON_WIDTH, h = HOUSE_ICON_HEIGHT;
+    // Background for full card (icon + data area)
+    lcd.fillRoundRect(x, y, w + 80, h, R, COL_HOUSE_GRN);
+    lcd.drawRoundRect(x, y, w + 80, h, R, CARD_BORDER);
+
+    // Draw house: soft rounded style
+    int cx = x + w / 2;
+    int roofY = y + 10;
+    int wallTop = y + 28;
+    int wallBot = y + h - 6;
+    int wallL = x + 16, wallR = x + w - 16;
+    int wallW = wallR - wallL, wallH = wallBot - wallTop;
+
+    // House body (rounded)
+    lcd.fillRoundRect(wallL, wallTop, wallW, wallH, 4, TEXT_LIGHT);
+    lcd.fillRoundRect(wallL + 2, wallTop + 2, wallW - 4, wallH - 4, 3, TFT_BLACK);
+
+    // Roof (triangle with thick lines for softness)
+    for (int t = 0; t < 3; t++) {
+        lcd.drawTriangle(cx, roofY + t, wallL - 6 + t, wallTop + 2, wallR + 6 - t, wallTop + 2, TEXT_LIGHT);
+    }
+
+    // Door (rounded)
+    int doorW = 10, doorH = 15;
+    int doorX = cx - doorW / 2, doorY = wallBot - doorH - 2;
+    lcd.fillRoundRect(doorX, doorY, doorW, doorH, 3, COL_AMBER);
+
+    // Windows (two small rounded)
+    lcd.fillRoundRect(wallL + 5, wallTop + 6, 9, 8, 2, COL_AMBER);
+    lcd.fillRoundRect(wallR - 14, wallTop + 6, 9, 8, 2, COL_AMBER);
+}
+
+void drawWeather() {
+    lcd.fillRoundRect(WEATHER_X, WEATHER_Y, WEATHER_W, WEATHER_H, R, CARD_DARK);
+    lcd.drawRoundRect(WEATHER_X, WEATHER_Y, WEATHER_W, WEATHER_H, R, CARD_BORDER);
+
+    if (!weatherLoaded) {
+        lcd.setTextColor(TEXT_DIM);
+        lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
+        lcd.setCursor(WEATHER_X + 10, WEATHER_Y + WEATHER_H / 2 - lcd.fontHeight() / 2);
+        lcd.print("...");
+        return;
+    }
+
+    // Weather icon (left side)
+    drawWeatherSymbol(WEATHER_X + 4, WEATHER_Y + 4, weatherId);
+
+    // Temperature (right side)
+    lcd.setTextColor(TEXT_LIGHT);
+    lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
+    String tempStr = String(weatherTemp, 1);
+    int tw = lcd.textWidth(tempStr);
+    int tx = WEATHER_X + 56;
+    int ty = WEATHER_Y + 8;
+    lcd.setCursor(tx, ty);
+    lcd.print(tempStr);
+    // degree + C
+    lcd.drawCircle(tx + tw + 4, ty, 3, TEXT_LIGHT);
+    lcd.setCursor(tx + tw + 9, ty);
+    lcd.print("C");
+
+    // Description (smaller, below temp)
+    lcd.setFont(&lgfx::v1::fonts::FreeSans9pt7b);
+    lcd.setTextColor(TEXT_DIM);
+    // Truncate if too long
+    String desc = weatherDesc;
+    if (desc.length() > 12) desc = desc.substring(0, 11) + ".";
+    lcd.setCursor(tx, ty + 30);
+    lcd.print(desc);
 }
 
 void drawGridPowerButton() {
-    lcd.fillRect(GRID_ICON_X, GRID_ICON_Y, GRID_ICON_WIDTH, GRID_ICON_HEIGHT, TFT_BLUE);
-    lcd.drawRect(GRID_ICON_X, GRID_ICON_Y, GRID_ICON_WIDTH, GRID_ICON_HEIGHT, TFT_BLACK);
+    lcd.fillRoundRect(GRID_ICON_X, GRID_ICON_Y, GRID_ICON_WIDTH, GRID_ICON_HEIGHT, R, COL_NAVY);
+    lcd.drawRoundRect(GRID_ICON_X, GRID_ICON_Y, GRID_ICON_WIDTH, GRID_ICON_HEIGHT, R, CARD_BORDER);
     String text = String(totalGridPowerKW, 2) + " kW";
     lcd.setTextColor(TFT_WHITE);
     lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
@@ -563,7 +785,7 @@ void drawPylontechSOCWithPower() {
     int ry = HOUSE_ICON_Y;
     int rw = 80, rh = HOUSE_ICON_HEIGHT;
 
-    lcd.setTextColor(TFT_BLACK);
+    lcd.setTextColor(TEXT_LIGHT);
     lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
 
     int sw = lcd.textWidth(socStr);
@@ -580,7 +802,7 @@ void drawClockTab() {
     if (getLocalTime(&timeinfo)) {
         char timeStr[16];
         strftime(timeStr, sizeof(timeStr), "%H:%M Uhr", &timeinfo);
-        lcd.setTextColor(TFT_BLACK);
+        lcd.setTextColor(TEXT_LIGHT);
         lcd.setTextSize(2);
         int tw = lcd.textWidth(timeStr);
         lcd.setCursor((TAB1_BUTTON_X - tw) / 2, (TFT_HEIGHT - lcd.fontHeight()) / 2);
@@ -606,20 +828,21 @@ void displayData() {
         drawHouseIcon();
         drawPylontechSOCWithPower();
         drawGridPowerButton();
+        drawWeather();
     } else if (currentTab == 2) {
-        lcd.fillRect(0, 0, TAB1_BUTTON_X - 1, TFT_HEIGHT, TFT_WHITE);
+        lcd.fillRect(0, 0, TAB1_BUTTON_X - 1, TFT_HEIGHT, BG_DARK);
     } else if (currentTab == 3) {
-        lcd.fillRect(0, 0, TAB1_BUTTON_X - 1, TFT_HEIGHT, TFT_WHITE);
+        lcd.fillRect(0, 0, TAB1_BUTTON_X - 1, TFT_HEIGHT, BG_DARK);
         drawTibberPriceGraph(tibberPrices, 48);
     }
 }
 
 void switchTab(int tab) {
     currentTab = tab;
-    lcd.fillRect(0, 0, TAB1_BUTTON_X - 1, TFT_HEIGHT, TFT_WHITE);
+    lcd.fillRect(0, 0, TAB1_BUTTON_X - 1, TFT_HEIGHT, BG_DARK);
     drawTabButtons();
     drawBrightnessButton();
-    lcd.setTextColor(TFT_BLACK);
+    lcd.setTextColor(TEXT_LIGHT);
     lcd.setTextSize(1);
     lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
 
@@ -963,8 +1186,8 @@ void setup() {
     // Display
     lcd.init();
     if (lcd.width() < lcd.height()) lcd.setRotation(lcd.getRotation() ^ 1);
-    lcd.fillScreen(TFT_WHITE);
-    lcd.setTextColor(TFT_BLACK);
+    lcd.fillScreen(BG_DARK);
+    lcd.setTextColor(TEXT_LIGHT);
     lcd.setFont(&lgfx::v1::fonts::FreeSansBold12pt7b);
 
     autoAdjustBrightness();
@@ -972,6 +1195,7 @@ void setup() {
 
     // Tibber
     fetchTibberPrices();
+    fetchWeather();
     drawTibberPrice();
 
     // Initial display
@@ -1034,6 +1258,15 @@ void loop() {
 
     // Daily price fetch
     checkAndFetchTibberPrices();
+
+    // Weather update every 30 minutes
+    if (millis() - lastWeatherFetch > WEATHER_UPDATE_MS) {
+        fetchWeather();
+        if (displayOn && LCD_LOCK()) {
+            drawWeather();
+            LCD_UNLOCK();
+        }
+    }
 
     vTaskDelay(pdMS_TO_TICKS(100));
 }
